@@ -8,11 +8,12 @@
 # The full app depends on heavy ML packages (torch, ultralytics, boxmot,
 # insightface, onnxruntime-gpu) that are large and slow to install. But the
 # modules covered by tests/ -- matcher.py, identity_db.py, partial.py, ui.py,
-# vlm.py (plus config.py / theme.py) -- only import a small set of third-party
-# packages at module level: numpy, opencv-python, faiss-cpu, pillow, requests.
-# So we install ONLY those light deps (listed explicitly below) plus the dev
-# requirements (pytest). We deliberately do NOT install torch/ultralytics/
-# boxmot/insightface here -- it would make CI huge and slow for no benefit.
+# vlm.py, admin.py (plus config.py / theme.py) -- only import a small set of
+# third-party packages at module level: numpy, opencv-python, faiss-cpu,
+# pillow, requests, flask. So we install ONLY those light deps (listed
+# explicitly below) plus the dev requirements (pytest). We deliberately do
+# NOT install torch/ultralytics/boxmot/insightface here -- it would make CI
+# huge and slow for no benefit.
 #
 # Note: tests/test_main_helpers.py covers cameralm/main.py, which DOES import
 # the heavy deps. That test file guards itself with pytest.importorskip("torch"),
@@ -49,7 +50,7 @@ jobs:
       - name: Install light dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install numpy opencv-python faiss-cpu pillow requests
+          pip install numpy opencv-python faiss-cpu pillow requests flask
           pip install -r requirements-dev.txt
 
       # Run the unit test suite. test_main_helpers.py skips without torch.

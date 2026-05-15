@@ -12,6 +12,11 @@ import json
 
 import pytest
 
+# Admin server requires Flask. In environments where Flask isn't installed
+# (some lightweight CI configurations), skip this whole module rather than
+# erroring at collection.
+pytest.importorskip("flask")
+
 import cameralm.admin as admin_mod
 from cameralm.admin import _COOKIE, _TOKEN, create_app
 
