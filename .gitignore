@@ -1,0 +1,32 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Virtual environments ---
+.venv/
+venv/
+env/
+
+# --- Model weights (downloaded on first run, not source code) ---
+*.pt
+*.onnx
+*.engine
+
+# --- Biometric / runtime data (NEVER push). Everything under data/ is
+#     personal information: face embeddings, body embeddings, clothing
+#     histograms, face thumbnails, the audit log, and runtime logs. ---
+data/
+logs/
+
+# --- IDE / editor ---
+.idea/
+.vscode/
+*.swp
+*~
+.DS_Store
+Thumbs.db

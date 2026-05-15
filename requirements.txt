@@ -1,0 +1,19 @@
+# CameraLM - non-PyTorch dependencies.
+# PyTorch is installed separately by setup.ps1 from the CUDA 12.1 wheel index.
+
+numpy>=1.26,<2.0
+opencv-python>=4.9
+pillow>=10.0
+faiss-cpu>=1.8
+requests>=2.31
+flask>=3.0
+waitress>=3.0
+
+ultralytics>=8.3,<9
+
+insightface==0.7.3
+onnxruntime-gpu==1.20.1
+
+# Body re-identification - boxmot bundles OSNet and downloads weights on first use.
+# (We started with torchreid but its setup.py imports break PEP 517 builds on Windows.)
+boxmot>=18.0

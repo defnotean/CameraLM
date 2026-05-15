@@ -1,0 +1,57 @@
+# CI: run CameraLM's pure-logic unit tests.
+#
+# CameraLM is a Windows-only app (it hardcodes C:/Windows/Fonts paths and uses
+# cv2.CAP_DSHOW), so CI runs on windows-latest to match the only supported OS.
+#
+# Light-install rationale
+# -----------------------
+# The full app depends on heavy ML packages (torch, ultralytics, boxmot,
+# insightface, onnxruntime-gpu) that are large and slow to install. But the
+# modules covered by tests/ -- matcher.py, identity_db.py, partial.py, ui.py,
+# vlm.py (plus config.py / theme.py) -- only import a small set of third-party
+# packages at module level: numpy, opencv-python, faiss-cpu, pillow, requests.
+# So we install ONLY those light deps (listed explicitly below) plus the dev
+# requirements (pytest). We deliberately do NOT install torch/ultralytics/
+# boxmot/insightface here -- it would make CI huge and slow for no benefit.
+#
+# Note: tests/test_main_helpers.py covers cameralm/main.py, which DOES import
+# the heavy deps. That test file guards itself with pytest.importorskip("torch"),
+# so without torch installed it simply SKIPS in CI -- this is intended behavior,
+# not a failure.
+
+name: tests
+
+# Run on every push and on every pull request.
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    # Windows-only project -> test on Windows.
+    runs-on: windows-latest
+
+    steps:
+      # Check out the repository.
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      # Install Python 3.11 (the version CameraLM targets).
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # Install ONLY the light deps the pure-logic tests need, plus pytest.
+      # Explicitly listed (not `-r requirements.txt`) to keep CI off the heavy
+      # ML stack. opencv-python-headless would also work here, but opencv-python
+      # matches what the project itself pins in requirements.txt.
+      - name: Install light dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install numpy opencv-python faiss-cpu pillow requests
+          pip install -r requirements-dev.txt
+
+      # Run the unit test suite. test_main_helpers.py skips without torch.
+      - name: Run tests
+        run: pytest tests/ -v
