@@ -66,9 +66,9 @@
 
   .stats {
     display: grid;
-    grid-template-columns: repeat(4, minmax(98px, 1fr));
+    grid-template-columns: repeat(5, minmax(92px, 1fr));
     gap: 10px;
-    min-width: min(520px, 100%);
+    min-width: min(620px, 100%);
   }
   .stat {
     background: rgba(27, 31, 38, .82);
@@ -342,6 +342,103 @@
   }
   .icon-btn:hover { background: var(--panel-3); color: var(--text); }
   .icon-btn.danger:hover { color: var(--red); background: rgba(255, 111, 111, .12); }
+
+  /* --- Consent pills: state at a glance on every person card --- */
+  .consent-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    margin-top: 6px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    font-size: 11px;
+    line-height: 1.4;
+    font-weight: 600;
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    border: 1px solid transparent;
+  }
+  .consent-pill.none    { background: rgba(242, 201, 76, .12); color: var(--amber); border-color: rgba(242, 201, 76, .35); }
+  .consent-pill.granted { background: rgba(34, 211, 154, .12); color: var(--green); border-color: rgba(34, 211, 154, .35); }
+  .consent-pill.revoked { background: rgba(255, 111, 111, .12); color: var(--red); border-color: rgba(255, 111, 111, .35); }
+  .last-seen-row { color: var(--dim); font-size: 11px; margin-top: 4px; }
+
+  /* --- Privacy panel: retention, manual sweep, audit log --- */
+  .privacy-panel {
+    background: rgba(21, 24, 29, .88);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    margin-bottom: 14px;
+    box-shadow: var(--shadow);
+    overflow: hidden;
+  }
+  .privacy-panel > summary {
+    list-style: none;
+    cursor: pointer;
+    padding: 12px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .privacy-panel > summary::-webkit-details-marker { display: none; }
+  .privacy-panel .chevron {
+    transition: transform .15s ease;
+    color: var(--muted);
+    flex: none;
+  }
+  .privacy-panel[open] > summary .chevron { transform: rotate(90deg); }
+  .privacy-title { margin: 0; font-size: 16px; font-weight: 700; }
+  .privacy-status {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 12px;
+  }
+  .privacy-body {
+    padding: 0 16px 16px;
+    display: grid;
+    gap: 14px;
+  }
+  .privacy-row {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 12px;
+    align-items: center;
+    padding: 10px 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+  }
+  .privacy-row .row-title {
+    font-weight: 600;
+    margin-right: 8px;
+  }
+  .privacy-row .row-detail { color: var(--muted); font-size: 12px; }
+  .privacy-row .row-actions { margin-left: auto; display: flex; gap: 6px; }
+  .audit-list {
+    background: var(--panel-2);
+    border: 1px solid var(--border-soft);
+    border-radius: 8px;
+    max-height: 320px;
+    overflow: auto;
+    font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+    font-size: 12px;
+    padding: 8px 12px;
+  }
+  .audit-list .audit-row {
+    padding: 4px 0;
+    border-bottom: 1px solid var(--border-soft);
+    display: grid;
+    grid-template-columns: 150px 140px 1fr;
+    gap: 10px;
+    color: var(--muted);
+  }
+  .audit-list .audit-row:last-child { border-bottom: 0; }
+  .audit-list .audit-ts { color: var(--dim); }
+  .audit-list .audit-action { color: var(--text); font-weight: 600; }
+  .audit-list .audit-detail { word-break: break-word; white-space: pre-wrap; color: var(--muted); }
+  .audit-empty { color: var(--dim); padding: 12px; text-align: center; }
 
   .chips {
     display: flex;
@@ -649,6 +746,7 @@
       <div class="stat"><div id="classCount" class="stat-value">0</div><div class="stat-label">Classes</div></div>
       <div class="stat"><div id="unassignedCount" class="stat-value">0</div><div class="stat-label">Unassigned</div></div>
       <div class="stat"><div id="imageCount" class="stat-value">0</div><div class="stat-label">Images</div></div>
+      <div class="stat"><div id="consentCount" class="stat-value">0/0</div><div class="stat-label">Consented</div></div>
     </section>
   </header>
 
@@ -699,6 +797,34 @@
       <div id="scheduleEmptyClasses" class="schedule-empty" hidden>
         Create a class above and it will become available in every cell.
       </div>
+    </div>
+  </details>
+
+  <details class="privacy-panel" id="privacyPanel">
+    <summary>
+      <span class="chevron" data-icon="chevron"></span>
+      <span data-icon="shield" style="color: var(--green);"></span>
+      <h2 class="privacy-title">Privacy</h2>
+      <span class="privacy-status" id="privacyStatus">- / - consented</span>
+    </summary>
+    <div class="privacy-body">
+      <div class="privacy-row">
+        <span class="row-title">Retention sweep</span>
+        <span class="row-detail" id="retentionDetail">Loading...</span>
+        <div class="row-actions">
+          <button class="button-soft" type="button" data-action="purge-stale" title="Drop embeddings for anyone past the retention window now">
+            <span aria-hidden="true" data-icon="refresh"></span>Run now
+          </button>
+        </div>
+      </div>
+      <div class="privacy-row">
+        <span class="row-title">Audit log</span>
+        <span class="row-detail">Append-only record of every identity mutation (creates, renames, consent, retention sweeps).</span>
+        <div class="row-actions">
+          <button class="button-soft" type="button" data-action="reload-audit">Reload</button>
+        </div>
+      </div>
+      <div class="audit-list" id="auditList"><div class="audit-empty">Loading audit log...</div></div>
     </div>
   </details>
 
@@ -793,7 +919,10 @@
     chevron: '<svg viewBox="0 0 24 24"><polyline points="9 18 15 12 9 6"></polyline></svg>',
     folder: '<svg viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2Z"></path></svg>',
     inbox: '<svg viewBox="0 0 24 24"><polyline points="22 12 16 12 14 15 10 15 8 12 2 12"></polyline><path d="M5.5 5h13l2 7v6a2 2 0 0 1-2 2H5.5a2 2 0 0 1-2-2v-6Z"></path></svg>',
-    calendar: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4"></path><path d="M8 2v4"></path><path d="M3 10h18"></path></svg>'
+    calendar: '<svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="18" rx="2"></rect><path d="M16 2v4"></path><path d="M8 2v4"></path><path d="M3 10h18"></path></svg>',
+    shield: '<svg viewBox="0 0 24 24"><path d="M12 2 4 5v6c0 5 3.5 9 8 11 4.5-2 8-6 8-11V5Z"></path></svg>',
+    clock: '<svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"></circle><polyline points="12 7 12 12 15 14"></polyline></svg>',
+    refresh: '<svg viewBox="0 0 24 24"><polyline points="21 5 21 10 16 10"></polyline><path d="M3.5 13a8.5 8.5 0 0 0 14.5 4l3-3"></path><polyline points="3 19 3 14 8 14"></polyline><path d="M20.5 11A8.5 8.5 0 0 0 6 7l-3 3"></path></svg>'
   };
 
   function mountIcons(root = document) {
@@ -847,10 +976,14 @@
     const unassignedAll = unassignedPeople();
     const withImages = state.people.filter((p) => p.has_thumbnail).length;
 
+    const granted = state.people.filter((p) => (p.consent || {}).status === "granted").length;
     $("#peopleCount").textContent = state.people.length;
     $("#classCount").textContent = state.classes.length;
     $("#unassignedCount").textContent = unassignedAll.length;
     $("#imageCount").textContent = `${withImages}/${state.people.length}`;
+    $("#consentCount").textContent = `${granted}/${state.people.length}`;
+    const privacyStatus = $("#privacyStatus");
+    if (privacyStatus) privacyStatus.textContent = `${granted} / ${state.people.length} consented`;
     $("#searchClear").hidden = !(searchInput && searchInput.value);
 
     renderNow();
@@ -1061,6 +1194,14 @@
   }
 
   function renderPersonCard(person) {
+    const consent = person.consent || { status: "none", granted_at: "", granted_by: "", notes: "" };
+    const status = consent.status || "none";
+    const consentLabel = consentPillLabel(consent);
+    const consentTitle = consentPillTitle(consent);
+    const consentBtnTitle = status === "granted" ? "Revoke consent (drops embeddings)" : "Record consent";
+    const consentBtnAction = status === "granted" ? "consent-revoke" : "consent-record";
+    const consentBtnClass = status === "granted" ? "icon-btn danger" : "icon-btn";
+    const lastSeen = person.last_seen_at ? formatRelative(person.last_seen_at) : "never";
     return `
       <article class="person-card" draggable="true" data-pid="${person.pid}">
         <div class="thumb-wrap">
@@ -1073,8 +1214,11 @@
             <div class="min-0">
               <div class="person-name" title="${escapeAttr(person.name)}">${escapeHtml(person.name)}</div>
               <div class="person-meta">ID ${person.pid}</div>
+              <div class="consent-pill ${status}" title="${escapeAttr(consentTitle)}">${escapeHtml(consentLabel)}</div>
+              <div class="last-seen-row" title="${escapeAttr(person.last_seen_at || 'never')}">Last seen: ${escapeHtml(lastSeen)}</div>
             </div>
             <div class="icon-row">
+              <button class="${consentBtnClass}" type="button" title="${escapeAttr(consentBtnTitle)}" data-action="${consentBtnAction}" data-pid="${person.pid}" data-name="${escapeAttr(person.name)}"><span data-icon="shield"></span></button>
               <button class="icon-btn" type="button" title="Rename" data-action="rename-person" data-pid="${person.pid}" data-name="${escapeAttr(person.name)}"><span data-icon="edit"></span></button>
               <button class="icon-btn" type="button" title="Add class" data-action="add-person-class" data-pid="${person.pid}"><span data-icon="tag"></span></button>
               <button class="icon-btn danger" type="button" title="Delete" data-action="delete-person" data-pid="${person.pid}"><span data-icon="trash"></span></button>
@@ -1091,6 +1235,41 @@
         </div>
       </article>
     `;
+  }
+
+  function consentPillLabel(consent) {
+    const status = (consent && consent.status) || "none";
+    if (status === "granted") {
+      const when = (consent.granted_at || "").slice(0, 10);
+      const who = (consent.granted_by || "").trim();
+      if (when && who) return `Consent: ${when} by ${who}`;
+      if (when) return `Consent: granted ${when}`;
+      return "Consent: granted";
+    }
+    if (status === "revoked") return "Consent: revoked";
+    return "Consent: not recorded";
+  }
+
+  function consentPillTitle(consent) {
+    if (!consent) return "";
+    const bits = [];
+    if (consent.granted_at) bits.push(`Granted at: ${consent.granted_at}`);
+    if (consent.granted_by) bits.push(`Attestor: ${consent.granted_by}`);
+    if (consent.notes) bits.push(`Notes: ${consent.notes}`);
+    return bits.join("\n") || "No consent recorded yet";
+  }
+
+  function formatRelative(iso) {
+    // Best-effort relative time. The string is whatever the server stored;
+    // fall back to "the raw value" if it does not parse.
+    const t = Date.parse(iso);
+    if (Number.isNaN(t)) return iso;
+    const secs = Math.max(0, (Date.now() - t) / 1000);
+    if (secs < 60) return "just now";
+    if (secs < 3600) return `${Math.floor(secs / 60)} min ago`;
+    if (secs < 86400) return `${Math.floor(secs / 3600)}h ago`;
+    if (secs < 86400 * 30) return `${Math.floor(secs / 86400)}d ago`;
+    return iso.slice(0, 10);
   }
 
   async function createClass(name) {
@@ -1163,6 +1342,107 @@
     await fetchState();
   }
 
+  // --- Privacy: consent record / revoke, retention sweep, audit log ---
+
+  async function recordConsent(pid, currentName) {
+    // Two-prompt flow keeps parity with the rest of this UI (no modal framework
+    // here). The granted_by attestor is required - the privacy story rests on
+    // a real human name being on the record, not a click-through.
+    const granted_by = prompt(
+      `Recording consent for "${currentName}".\n\nWho is attesting? (your name or role, required)`,
+      ""
+    );
+    if (granted_by === null) return;
+    if (!granted_by.trim()) { alert("Attestor is required."); return; }
+    const notes = prompt(
+      "Optional notes (e.g., 'verbal consent at staff meeting', 'guardian form on file').",
+      ""
+    );
+    if (notes === null) return;     // user cancelled - do not record
+    const r = await fetch(`/api/identity/${pid}/consent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ granted_by: granted_by.trim(), notes: notes || "" })
+    });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({ error: r.statusText }));
+      alert(`Could not record consent: ${body.error || r.statusText}`);
+      return;
+    }
+    await fetchState();
+    await loadAudit();
+  }
+
+  async function revokeConsent(pid, currentName) {
+    if (!confirm(
+      `Revoke consent for "${currentName}"?\n\n` +
+      `This will DROP all of their stored face / body / partial vectors immediately.\n` +
+      `Their name + class memberships will remain (for the audit record). To fully delete the person, use the trash button after.`
+    )) return;
+    const r = await fetch(`/api/identity/${pid}/consent`, { method: "DELETE" });
+    if (!r.ok) {
+      alert(`Could not revoke consent: ${r.statusText}`);
+      return;
+    }
+    await fetchState();
+    await loadAudit();
+  }
+
+  async function runPurgeStale() {
+    if (!confirm(
+      "Run the retention sweep now?\n\n" +
+      "This will drop face / body / partial vectors for anyone whose last_seen_at is older than the configured retention window. Names and class memberships are preserved."
+    )) return;
+    const r = await fetch("/api/purge-stale", { method: "POST" });
+    if (!r.ok) {
+      alert(`Sweep failed: ${r.statusText}`);
+      return;
+    }
+    const body = await r.json();
+    if (body.retention_days === 0) {
+      alert("Retention is disabled (RETENTION_DAYS = 0 in config.py). Nothing was purged.");
+    } else if (!body.purged.length) {
+      alert(`Sweep complete. Nothing past the ${body.retention_days}-day window.`);
+    } else {
+      const names = body.purged.map((p) => `- ${p.name} (last seen ${p.age_days}d ago)`).join("\n");
+      alert(`Sweep complete. Dropped vectors for ${body.purged.length} people:\n\n${names}`);
+    }
+    await fetchState();
+    await loadAudit();
+  }
+
+  async function loadAudit() {
+    const list = $("#auditList");
+    if (!list) return;
+    try {
+      const r = await fetch("/api/audit?limit=200");
+      const body = await r.json();
+      const days = body.retention_days || 0;
+      const retentionEl = $("#retentionDetail");
+      if (retentionEl) {
+        retentionEl.textContent = days > 0
+          ? `RETENTION_DAYS = ${days}. People not seen in that long lose their embeddings on sweep; names + classes survive.`
+          : "Retention sweep is disabled (RETENTION_DAYS = 0 in config.py). Set a positive number to enable it.";
+      }
+      const rows = body.entries || [];
+      if (!rows.length) {
+        list.innerHTML = '<div class="audit-empty">No audit entries yet.</div>';
+        return;
+      }
+      // Newest first.
+      rows.reverse();
+      list.innerHTML = rows.map((row) => `
+        <div class="audit-row">
+          <span class="audit-ts">${escapeHtml(row.ts || "")}</span>
+          <span class="audit-action">${escapeHtml(row.action || "")}</span>
+          <span class="audit-detail">${escapeHtml(row.detail || "")}</span>
+        </div>
+      `).join("");
+    } catch (err) {
+      list.innerHTML = '<div class="audit-empty">Could not load audit log.</div>';
+    }
+  }
+
   // --- Event delegation ---
 
   document.addEventListener("click", (event) => {
@@ -1185,6 +1465,10 @@
     if (action === "add-person-class") return promptAssign(pid);
     if (action === "delete-person") return deletePerson(pid);
     if (action === "remove-person-class") return removeFromClass(pid, className);
+    if (action === "consent-record") return recordConsent(pid, target.dataset.name);
+    if (action === "consent-revoke") return revokeConsent(pid, target.dataset.name);
+    if (action === "purge-stale") return runPurgeStale();
+    if (action === "reload-audit") return loadAudit();
     if (action === "expand-all") {
       state.classes.forEach((c) => expandedClasses.add(c.name));
       expandedUnassigned = true;
@@ -1327,7 +1611,12 @@
   loadNowFromStorage();
   mountIcons();
   fetchState();
+  loadAudit();
   setInterval(fetchState, 1500);
+  // Audit log refreshes far slower than the state - it grows append-only and
+  // the panel is closed by default. 30s keeps it current without saturating
+  // the disk for a closed drawer.
+  setInterval(loadAudit, 30000);
 </script>
 </body>
 </html>

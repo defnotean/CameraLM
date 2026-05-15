@@ -11,6 +11,9 @@ from .config import (
     ADMIN_ENABLED,
     ADMIN_PORT,
     AUTOSAVE_SECONDS,
+    REQUIRE_CONSENT_FOR_RECOGNITION,
+    RETENTION_DAYS,
+    RETENTION_PURGE_ON_STARTUP,
     STATS_LOG_INTERVAL_SECONDS,
     USE_BODY_REID,
     USE_PARTIAL_REID,
@@ -89,6 +92,19 @@ def main():
     if seeded_partial:
         log.info("Seeded %d partial appearance signatures from thumbnails.", seeded_partial)
     log.info("Loaded. %d known identities.", db.count_people())
+
+    if RETENTION_PURGE_ON_STARTUP and RETENTION_DAYS > 0:
+        purged = db.purge_stale(RETENTION_DAYS)
+        if purged:
+            db.save()
+            log.warning(
+                "Retention sweep (RETENTION_DAYS=%d) dropped embeddings for %d people: %s",
+                RETENTION_DAYS,
+                len(purged),
+                ", ".join(f"{p['name']}(pid={p['pid']}, {p['age_days']}d)" for p in purged),
+            )
+        else:
+            log.info("Retention sweep (RETENTION_DAYS=%d): nothing to purge.", RETENTION_DAYS)
 
     descriptions = DescriptionStore(ttl_seconds=VLM_DESC_TTL_SECONDS)
     vlm_worker = None
@@ -211,6 +227,19 @@ def main():
                     r = Renderer(frame)
                     for tid, info in frame_info.items():
                         is_unknown = info.pid is None or not db.has_person(info.pid)
+                        # Consent gate (opt-in): even if the pipeline has a
+                        # confident match, suppress the name + class chips in
+                        # the live view until consent is on file. Stored
+                        # vectors still drive the match - flipping consent in
+                        # the admin UI surfaces them immediately on the next
+                        # frame.
+                        consent_gated = (
+                            not is_unknown
+                            and REQUIRE_CONSENT_FOR_RECOGNITION
+                            and not db.is_consent_granted(info.pid)
+                        )
+                        if consent_gated:
+                            is_unknown = True
                         label = "Unknown" if is_unknown else db.get_name(info.pid)
                         classes = db.classes_of(info.pid) if not is_unknown else None
                         draw_track(

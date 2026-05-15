@@ -14,7 +14,7 @@ from threading import Thread
 
 from flask import Flask, abort, jsonify, make_response, render_template, request, send_file
 
-from .config import ADMIN_HOST, ADMIN_PORT
+from .config import ADMIN_HOST, ADMIN_PORT, RETENTION_DAYS
 from .identity_db import IdentityDB
 
 log = logging.getLogger(__name__)
@@ -222,6 +222,73 @@ def create_app(db: IdentityDB) -> Flask:
         db.save()
         log.warning("Admin wiped all identity data (%d people removed).", n)
         return jsonify({"ok": True, "deleted": n})
+
+    @app.route("/api/identity/<int:pid>/consent", methods=["POST"])
+    def record_consent(pid):
+        """Record affirmative consent for a person.
+
+        Body: {"granted_by": str (required), "notes": str (optional)}.
+        granted_by is the operator/role attesting consent - the privacy story
+        rests on a real human name being on the record, not a click-through.
+        Length-bounded to keep the audit log from being weaponized.
+        """
+        data = request.get_json(silent=True) or {}
+        granted_by_raw = data.get("granted_by", "")
+        notes_raw = data.get("notes", "")
+        if not isinstance(granted_by_raw, str) or not isinstance(notes_raw, str):
+            abort(400, "granted_by and notes must be strings")
+        granted_by = granted_by_raw.strip()
+        if not granted_by:
+            abort(400, "granted_by is required")
+        if len(granted_by) > 120 or len(notes_raw) > 500:
+            abort(400, "granted_by or notes too long")
+        if not db.record_consent(pid, granted_by, notes_raw):
+            abort(404)
+        db.save()
+        return jsonify({"ok": True})
+
+    @app.route("/api/identity/<int:pid>/consent", methods=["DELETE"])
+    def revoke_consent(pid):
+        """Revoke consent + drop all of that person's biometric vectors.
+
+        Hard break: name and class memberships survive (so the admin UI can
+        surface the revoked entry for follow-up), but face/body/partial
+        embeddings are gone before this request returns.
+        """
+        if not db.revoke_consent(pid):
+            abort(404)
+        db.save()
+        return jsonify({"ok": True})
+
+    @app.route("/api/audit")
+    def audit_log():
+        """Tail the audit log. Query params:
+          - ``limit`` (int, default 200, max 1000): cap on entries returned.
+          - ``since`` (ISO datetime): return only entries strictly after this.
+        Used by the admin UI Privacy panel; also useful for compliance review.
+        """
+        try:
+            limit = int(request.args.get("limit", "200"))
+        except ValueError:
+            abort(400, "limit must be an integer")
+        limit = max(1, min(limit, 1000))
+        since = request.args.get("since") or None
+        rows = db.read_audit(limit=limit, since=since)
+        return jsonify({"entries": rows, "retention_days": RETENTION_DAYS})
+
+    @app.route("/api/purge-stale", methods=["POST"])
+    def purge_stale():
+        """Run a retention sweep on demand. Drops embeddings for anyone whose
+        last_seen_at is older than the configured RETENTION_DAYS. Disabled
+        (no-op) when RETENTION_DAYS=0.
+        """
+        if RETENTION_DAYS <= 0:
+            return jsonify({"ok": True, "purged": [], "retention_days": 0})
+        purged = db.purge_stale(RETENTION_DAYS)
+        if purged:
+            db.save()
+            log.info("Retention sweep dropped embeddings for %d people.", len(purged))
+        return jsonify({"ok": True, "purged": purged, "retention_days": RETENTION_DAYS})
 
     return app
 

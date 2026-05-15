@@ -101,6 +101,48 @@ def test_process_tracks_caps_resolves_per_frame(db, monkeypatch):
     assert len(deferred) == 6 - MAX_RESOLVES_PER_FRAME
 
 
+def test_process_tracks_touches_last_seen_for_recognized_pids(db, monkeypatch):
+    """Every inference frame stamps `last_seen_at` on every pid that resolved to
+    a known person. This is what drives `purge_stale` - a person you saw 5 min
+    ago should not be on the chopping block."""
+    from helpers import face_vec
+
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    assert db.people[pid]["last_seen_at"] == ""
+
+    def _resolve_to_alice(bbox_t, frame, prev, now, *_a, **_k):
+        return TrackState(bbox=bbox_t, pid=pid, source="face", sim=0.9,
+                          last_check=now, last_seen=now)
+
+    monkeypatch.setattr("cameralm.pipeline.resolve_track_identity", _resolve_to_alice)
+    worker = _process_worker(db)
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    tracks = [(1, (0, 0, 20, 40), 0.9)]
+
+    worker._process_tracks(frame, tracks, now=100.0)
+
+    assert db.people[pid]["last_seen_at"]      # got stamped
+
+
+def test_process_tracks_does_not_touch_last_seen_for_unknown_tracks(db, monkeypatch):
+    """An unidentified track is not a sighting of any known person - no
+    `last_seen_at` should move for anyone."""
+    from helpers import face_vec
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+
+    def _resolve_unknown(bbox_t, frame, prev, now, *_a, **_k):
+        return TrackState(bbox=bbox_t, pid=None, last_check=now, last_seen=now)
+
+    monkeypatch.setattr("cameralm.pipeline.resolve_track_identity", _resolve_unknown)
+    worker = _process_worker(db)
+    frame = np.zeros((64, 64, 3), dtype=np.uint8)
+    worker._process_tracks(frame, [(1, (0, 0, 20, 40), 0.9)], now=100.0)
+
+    assert db.people[pid]["last_seen_at"] == ""
+
+
 def test_process_tracks_resolves_longest_waiting_first(db, monkeypatch):
     """When capped, the stale tracks that have waited longest (oldest last_check)
     are the ones re-embedded - so nothing starves."""

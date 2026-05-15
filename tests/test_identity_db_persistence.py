@@ -216,6 +216,72 @@ def test_schedule_dangling_reference_cleared_on_load(data_dir):
     assert fresh.schedule["A"] == ""
 
 
+def test_consent_and_last_seen_round_trip(data_dir):
+    """Consent state, last_seen_at, and created_at all survive save/load."""
+    db = IdentityDB()
+    pid = db.create_person("Alice")
+    db.record_consent(pid, "Ms. Smith", "verbal consent at homeroom")
+    db.touch_last_seen([pid], at="2026-02-15T14:30:00")
+    saved_consent = dict(db.people[pid]["consent"])
+    saved_last_seen = db.people[pid]["last_seen_at"]
+    saved_created = db.people[pid]["created_at"]
+    db.save()
+
+    fresh = IdentityDB()
+    assert fresh.people[pid]["consent"] == saved_consent
+    assert fresh.people[pid]["last_seen_at"] == saved_last_seen
+    assert fresh.people[pid]["created_at"] == saved_created
+
+
+def test_legacy_person_record_backfills_consent_fields(data_dir):
+    """A persisted person from before the privacy fields existed must load
+    cleanly with safe defaults (consent.status='none', empty last_seen)."""
+    legacy_meta = {
+        "next_pid": 2,
+        "people": {
+            # No consent / last_seen_at / created_at - pre-privacy install.
+            "1": {"name": "Legacy", "n_face": 0, "n_body": 0, "n_partial": 0, "classes": []},
+        },
+        "classes": {},
+        "face_pids": [],
+        "body_pids": [],
+        "partial_pids": [],
+    }
+    (data_dir / "identities.json").write_text(json.dumps(legacy_meta))
+    np.savez(
+        data_dir / "embeddings.npz",
+        face=np.empty((0, idb.FACE_DIM), dtype=np.float32),
+        body=np.empty((0, idb.REID_DIM), dtype=np.float32),
+        partial=np.empty((0, idb.PARTIAL_DIM), dtype=np.float32),
+    )
+    db = IdentityDB()
+    person = db.people[1]
+    assert person["consent"]["status"] == "none"
+    assert person["consent"]["granted_at"] == ""
+    assert person["last_seen_at"] == ""
+    assert person["created_at"] == ""
+
+
+def test_corrupt_consent_status_is_normalized_to_none(data_dir):
+    """A garbage `status` value (hand-edited file, version mismatch) loads
+    back as 'none' rather than crashing or being trusted - the consent gate
+    is too important to leave undefined."""
+    db = IdentityDB()
+    pid = db.create_person("Alice")
+    db.record_consent(pid, "Ms. Smith")
+    db.save()
+
+    # Corrupt the consent.status on disk.
+    arr = dict(np.load(data_dir / "embeddings.npz", allow_pickle=False))
+    meta = json.loads(str(arr["meta"]))
+    meta["people"][str(pid)]["consent"]["status"] = "definitely-not-a-status"
+    arr["meta"] = np.asarray(json.dumps(meta))
+    np.savez(data_dir / "embeddings.npz", **arr)
+
+    fresh = IdentityDB()
+    assert fresh.people[pid]["consent"]["status"] == "none"
+
+
 def test_legacy_per_day_schedule_migrates_to_per_block(data_dir):
     """A file saved by the previous per-(day, block) schedule shape collapses
     on load - each block keeps the first non-empty class it had across days."""

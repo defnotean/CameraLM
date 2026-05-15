@@ -15,16 +15,18 @@ What ships in the box:
 * All identity data lives under `data/`, which is excluded from git by default. Do not commit it.
 * The admin server binds to loopback only (`127.0.0.1:8765`). It is not reachable from other devices on the network.
 * The admin UI has a Host-header allowlist plus a SameSite=Strict session cookie as CSRF / DNS-rebinding defense.
-* Every identity mutation is recorded in `data/audit.log`.
+* Every identity mutation is recorded in `data/audit.log`, viewable in the admin UI Privacy panel or via `python reset_identity.py --audit`.
+* Consent metadata per person: status, attestor, timestamp, optional notes. Recorded from the admin UI via the shield icon.
+* Optional retention sweep: `RETENTION_DAYS` in `config.py`. People not seen for that long lose their stored vectors (names + classes survive). Runs on startup and on demand from the admin UI.
+* Optional consent display gate: `REQUIRE_CONSENT_FOR_RECOGNITION = True` suppresses the live overlay name/class chips for anyone whose consent is not on file.
 
 What is **not** built in (and is on you):
 
-* Encryption at rest.
-* A consent / enrollment-gated flow.
-* A retention or end-of-term purge policy.
-* Anything resembling formal compliance.
+* Encryption at rest (`data/` is plaintext on disk - put it on an encrypted volume).
+* A camera-side consent gate (you record consent in the admin UI **after** enrollment, not before).
+* Any compliance certification.
 
-If any of that matters to you, read `FOLLOWUPS.md` section 1 before you turn this on for a real classroom.
+Read [PRIVACY.md](PRIVACY.md) before deploying this against real people. It documents the per-person record schema, the consent flow, the retention sweep, the audit log, and the subject-rights checklist.
 
 ---
 
@@ -209,6 +211,9 @@ Knobs you are most likely to touch:
 | `MAX_RESOLVES_PER_FRAME` | 1 | Cap on per-frame embedder work. With 1, framerate does not depend on how many people are on screen. |
 | `SCHEDULE_DAYS` | 6 | Days in the rotating block schedule |
 | `SCHEDULE_BLOCKS` | `("A", "B", "C", "D")` | Block names |
+| `RETENTION_DAYS` | 0 | Days of inactivity before a person's vectors are purged. 0 = disabled. See [PRIVACY.md](PRIVACY.md) section 4. |
+| `RETENTION_PURGE_ON_STARTUP` | True | Run a retention sweep at app launch (no-op when `RETENTION_DAYS=0`). |
+| `REQUIRE_CONSENT_FOR_RECOGNITION` | False | When True, the live overlay shows "Unknown" for anyone whose consent is not granted in the admin UI. |
 | `USE_VLM` | False | Enable the optional Vision-Language Model (see below) |
 
 ---
@@ -230,7 +235,12 @@ The descriptions appear under each person's name in the live overlay, refreshed 
 ## Tools
 
 * `start.bat` - launches the app and opens the admin UI in your default browser.
-* `reset_identity.py` - clears a person's stored embeddings while keeping their name and classes. Used to undo auto-learning drift. Backs up `embeddings.npz` first.
+* `reset_identity.py` - the offline identity / privacy tool. Subcommands:
+  * default / `--list`: list everyone with their counts and consent status.
+  * `<pid_or_name>...` / `--all`: clear stored embeddings (keeps name + classes). Used to undo auto-learning drift. Backs up `embeddings.npz` first.
+  * `--audit [N]`: dump the last N audit-log entries (default 500).
+  * `--consent-report`: per-person consent status + attestor + last seen.
+  * `--purge-stale DAYS`: run a retention sweep with the given cutoff and back up `embeddings.npz` first.
 * `camera_probe.py` - diagnostic that measures raw camera throughput at YUY2 versus MJPG. Useful if FPS feels wrong before the recognition pipeline is in the picture.
 
 ---

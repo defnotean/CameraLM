@@ -220,6 +220,25 @@ STATS_LOG_INTERVAL_SECONDS = 10.0
 SCHEDULE_DAYS = 6
 SCHEDULE_BLOCKS = ("A", "B", "C", "D")
 
+# --- Privacy / retention ---
+# How many days of inactivity before a person's biometric vectors are dropped
+# by the retention sweep. The person's name + class memberships survive (so the
+# audit trail still reads sensibly), only their face/body/partial embeddings go.
+# 0 disables the sweep entirely (good for dev; production deployments should
+# pick a real number aligned with the local retention policy).
+RETENTION_DAYS = 0
+# If True, run a retention sweep once on startup. Idempotent - safe to leave on
+# even when RETENTION_DAYS=0 (it becomes a no-op).
+RETENTION_PURGE_ON_STARTUP = True
+# If True, a person whose consent status is not "granted" is shown as "Unknown"
+# in the live overlay even when the pipeline has identified them. Their stored
+# vectors still drive the match, so flipping consent to granted in the admin
+# surfaces them immediately - the gate is purely on display, not on processing.
+# Default False so the dev workflow (enroll then keep using) is unchanged;
+# real classroom deployments should set this True and use the admin UI to
+# attest consent for each person before recognition surfaces.
+REQUIRE_CONSENT_FOR_RECOGNITION = False
+
 
 # --- Invariant checks (P5) ---
 # These constants are flat (every module imports them by name), but the values
@@ -332,6 +351,9 @@ def _validate_config() -> None:
         all(isinstance(b, str) and b.strip() for b in SCHEDULE_BLOCKS),
         "every entry in SCHEDULE_BLOCKS must be a non-empty string",
     )
+
+    # Privacy / retention
+    _require(RETENTION_DAYS >= 0, "RETENTION_DAYS must be >= 0 (0 disables the sweep)")
 
 
 _validate_config()

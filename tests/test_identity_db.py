@@ -740,3 +740,307 @@ def test_snapshot_includes_schedule_and_dims(db):
     assert snap["schedule_dims"]["days"] == SCHEDULE_DAYS
     assert snap["schedule_dims"]["blocks"] == list(SCHEDULE_BLOCKS)
     assert snap["schedule"]["B"] == "Math 10"
+
+
+# --------------------------------------------------------------------------
+# privacy: consent record / revoke
+# --------------------------------------------------------------------------
+
+def test_new_person_has_consent_none(db):
+    """Fresh enrollments start with no recorded consent - the operator must
+    affirmatively record it before the privacy state is anything other than
+    'we have not asked yet'."""
+    pid = db.create_person("Alice")
+    consent = db.people[pid]["consent"]
+    assert consent["status"] == "none"
+    assert consent["granted_at"] == ""
+    assert consent["granted_by"] == ""
+    assert consent["notes"] == ""
+
+
+def test_record_consent_marks_granted_with_timestamp_and_attestor(db):
+    pid = db.create_person("Alice")
+    assert db.record_consent(pid, "Ms. Smith", "verbal consent at homeroom") is True
+    consent = db.people[pid]["consent"]
+    assert consent["status"] == "granted"
+    assert consent["granted_by"] == "Ms. Smith"
+    assert consent["notes"] == "verbal consent at homeroom"
+    # granted_at is set to the current ISO timestamp - shape check, not exact
+    # equality (we shouldn't fight wall-clock granularity in unit tests).
+    assert consent["granted_at"]
+    assert "T" in consent["granted_at"]
+
+
+def test_record_consent_requires_attestor(db):
+    """Empty/whitespace `granted_by` is rejected - the privacy story is built
+    on knowing WHO attested, not just that someone clicked a button."""
+    pid = db.create_person("Alice")
+    assert db.record_consent(pid, "", "no attestor") is False
+    assert db.record_consent(pid, "   ", "still no attestor") is False
+    assert db.people[pid]["consent"]["status"] == "none"
+
+
+def test_record_consent_unknown_pid_returns_false(db):
+    assert db.record_consent(999, "Ms. Smith") is False
+
+
+def test_record_consent_truncates_oversized_fields(db):
+    """A pasted essay must not be allowed to bloat the audit log indefinitely."""
+    pid = db.create_person("Alice")
+    db.record_consent(pid, "X" * 500, "Y" * 5000)
+    consent = db.people[pid]["consent"]
+    assert len(consent["granted_by"]) <= 120
+    assert len(consent["notes"]) <= 500
+
+
+def test_is_consent_granted_reflects_status(db):
+    pid = db.create_person("Alice")
+    assert db.is_consent_granted(pid) is False        # default: none
+    db.record_consent(pid, "Ms. Smith")
+    assert db.is_consent_granted(pid) is True
+    db.revoke_consent(pid)
+    assert db.is_consent_granted(pid) is False
+
+
+def test_is_consent_granted_unknown_pid_is_false(db):
+    """An unknown pid is conservatively NOT-granted, so a stale display can't
+    accidentally surface a deleted identity."""
+    assert db.is_consent_granted(999) is False
+
+
+def test_revoke_consent_drops_embeddings_but_keeps_person(db):
+    """Revocation is a hard break on biometric processing: every face/body/
+    partial vector is dropped immediately. The name + class memberships
+    survive so the admin UI surfaces the revoked record."""
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    db.add_body(pid, body_vec(seed=2))
+    db.add_partial(pid, partial_vec(seed=3))
+    db.add_to_class(pid, "Grade 8A")
+    db.record_consent(pid, "Ms. Smith")
+
+    assert db.revoke_consent(pid) is True
+
+    # Biometric data is gone.
+    assert db.people[pid]["n_face"] == 0
+    assert db.people[pid]["n_body"] == 0
+    assert db.people[pid]["n_partial"] == 0
+    assert db.face_index.ntotal == 0
+    # Person record + class membership survive.
+    assert db.has_person(pid)
+    assert db.classes_of(pid) == ["Grade 8A"]
+    # Consent status flipped to revoked; historical fields preserved.
+    consent = db.people[pid]["consent"]
+    assert consent["status"] == "revoked"
+    assert consent["granted_by"] == "Ms. Smith"      # history not wiped
+
+
+def test_revoke_consent_unknown_pid_returns_false(db):
+    assert db.revoke_consent(999) is False
+
+
+def test_revoke_consent_idempotent_on_never_granted(db):
+    """Revoking a person who was never granted is still valid (drops any vectors
+    that snuck in, logs the action) - useful for emergency wipes."""
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    assert db.revoke_consent(pid) is True
+    assert db.people[pid]["n_face"] == 0
+    assert db.people[pid]["consent"]["status"] == "revoked"
+
+
+def test_snapshot_includes_consent_and_last_seen(db):
+    pid = db.create_person("Alice")
+    db.record_consent(pid, "Ms. Smith", "ok")
+    db.touch_last_seen([pid])
+    snap = db.snapshot()
+    person = _snapshot_person(snap, pid)
+    assert person["consent"]["status"] == "granted"
+    assert person["consent"]["granted_by"] == "Ms. Smith"
+    assert person["last_seen_at"]    # stamped
+
+
+# --------------------------------------------------------------------------
+# privacy: touch_last_seen
+# --------------------------------------------------------------------------
+
+def test_touch_last_seen_stamps_every_listed_pid(db):
+    a = db.create_person("Alice")
+    b = db.create_person("Bob")
+    db.touch_last_seen([a, b])
+    assert db.people[a]["last_seen_at"]
+    assert db.people[b]["last_seen_at"]
+
+
+def test_touch_last_seen_ignores_unknown_pids(db):
+    """Pipeline must be able to pass any pid set without crashing - a track may
+    have resolved to a pid that the admin UI just deleted."""
+    a = db.create_person("Alice")
+    db.touch_last_seen([a, 999, 1000])           # no exception
+    assert db.people[a]["last_seen_at"]
+    assert 999 not in db.people
+
+
+def test_touch_last_seen_explicit_timestamp(db):
+    a = db.create_person("Alice")
+    db.touch_last_seen([a], at="2026-01-01T08:00:00")
+    assert db.people[a]["last_seen_at"] == "2026-01-01T08:00:00"
+
+
+# --------------------------------------------------------------------------
+# privacy: purge_stale (retention sweep)
+# --------------------------------------------------------------------------
+
+def _backdate(person: dict, days: int) -> None:
+    """Helper: rewrite a person's last_seen_at to N days in the past."""
+    from datetime import datetime, timedelta
+    person["last_seen_at"] = (datetime.now() - timedelta(days=days)).isoformat(
+        timespec="seconds"
+    )
+
+
+def test_purge_stale_zero_days_is_noop(db):
+    """0 (or negative) disables retention - the sweep returns empty without
+    touching any vectors."""
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    _backdate(db.people[pid], 999)
+
+    assert db.purge_stale(0) == []
+    assert db.purge_stale(-5) == []
+    assert db.people[pid]["n_face"] == 1
+
+
+def test_purge_stale_drops_old_persons_vectors(db):
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    db.add_body(pid, body_vec(seed=2))
+    db.add_partial(pid, partial_vec(seed=3))
+    db.add_to_class(pid, "Grade 8A")
+    _backdate(db.people[pid], 400)
+
+    purged = db.purge_stale(retention_days=365)
+
+    assert len(purged) == 1
+    assert purged[0]["pid"] == pid
+    assert purged[0]["name"] == "Alice"
+    assert purged[0]["age_days"] >= 400
+    # Biometrics gone, roster entry survives.
+    assert db.people[pid]["n_face"] == 0
+    assert db.people[pid]["n_body"] == 0
+    assert db.people[pid]["n_partial"] == 0
+    assert db.has_person(pid)
+    assert db.classes_of(pid) == ["Grade 8A"]
+
+
+def test_purge_stale_keeps_recent_persons_vectors(db):
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    _backdate(db.people[pid], 10)            # well within a 365d window
+
+    assert db.purge_stale(retention_days=365) == []
+    assert db.people[pid]["n_face"] == 1
+
+
+def test_purge_stale_leaves_unseen_persons_alone(db):
+    """A person with no last_seen_at and no created_at predates this feature -
+    the sweep cannot prove they are stale, so it leaves them alone."""
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    # Strip both stamps to simulate a pre-privacy install.
+    db.people[pid]["last_seen_at"] = ""
+    db.people[pid]["created_at"] = ""
+
+    assert db.purge_stale(retention_days=1) == []
+    assert db.people[pid]["n_face"] == 1
+
+
+def test_purge_stale_ages_from_created_at_when_never_seen(db):
+    """A person enrolled but never recognized is aged off their created_at -
+    forgotten enrollments shouldn't live forever just because they never
+    matched anything."""
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    # Backdate created_at, leave last_seen_at empty.
+    from datetime import datetime, timedelta
+    db.people[pid]["created_at"] = (
+        datetime.now() - timedelta(days=999)
+    ).isoformat(timespec="seconds")
+    db.people[pid]["last_seen_at"] = ""
+
+    purged = db.purge_stale(retention_days=365)
+    assert len(purged) == 1
+    assert purged[0]["pid"] == pid
+    assert db.people[pid]["n_face"] == 0
+
+
+def test_purge_stale_skips_persons_with_no_vectors(db):
+    """A stale roster entry with zero embeddings has nothing to purge - the
+    sweep shouldn't churn the audit log with no-ops."""
+    pid = db.create_person("Alice")
+    _backdate(db.people[pid], 999)
+    assert db.purge_stale(retention_days=365) == []
+
+
+def test_purge_stale_handles_corrupt_timestamp(db):
+    """A garbage timestamp doesn't match any retention window - leave the
+    person alone rather than crashing the sweep."""
+    pid = db.create_person("Alice")
+    db.add_face(pid, face_vec(seed=1))
+    db.people[pid]["last_seen_at"] = "not-a-date"
+    db.people[pid]["created_at"] = "also-not"
+
+    assert db.purge_stale(retention_days=1) == []
+    assert db.people[pid]["n_face"] == 1
+
+
+# --------------------------------------------------------------------------
+# privacy: audit log reader
+# --------------------------------------------------------------------------
+
+def test_read_audit_returns_recent_actions(db):
+    """Every mutation already writes a line to data/audit.log; the reader just
+    parses and serves them back."""
+    pid = db.create_person("Alice")
+    db.record_consent(pid, "Ms. Smith")
+    db.rename_person(pid, "Alicia")
+
+    rows = db.read_audit(limit=50)
+    actions = [row["action"] for row in rows]
+    assert "create_person" in actions
+    assert "record_consent" in actions
+    assert "rename_person" in actions
+    # Most recent action is last (chronological).
+    assert rows[-1]["action"] == "rename_person"
+
+
+def test_read_audit_filters_by_since(db):
+    """A `since` cutoff returns only entries strictly after it - the admin UI
+    uses this to tail the log without re-fetching the world every poll."""
+    import time as time_mod
+    pid = db.create_person("Alice")
+    time_mod.sleep(1.05)         # cross a one-second boundary
+    cutoff = _now_iso_for_test()
+    time_mod.sleep(1.05)
+    db.rename_person(pid, "Alicia")
+
+    rows = db.read_audit(since=cutoff)
+    assert all(row["ts"] > cutoff for row in rows)
+    assert any(row["action"] == "rename_person" for row in rows)
+    assert not any(row["action"] == "create_person" for row in rows)
+
+
+def test_read_audit_no_file_returns_empty(db, monkeypatch):
+    """No audit file is fine - that's the state of a freshly-created data dir
+    BEFORE any mutation has run. The reader returns [], not a crash."""
+    import cameralm.identity_db as idb
+    from pathlib import Path
+    monkeypatch.setattr(idb, "AUDIT_FILE", Path("/nonexistent/audit.log"))
+    assert db.read_audit() == []
+
+
+def _now_iso_for_test() -> str:
+    """Mirror cameralm.identity_db._now_iso for tests that need to fence the
+    log without reaching into private helpers."""
+    import time as time_mod
+    return time_mod.strftime("%Y-%m-%dT%H:%M:%S")

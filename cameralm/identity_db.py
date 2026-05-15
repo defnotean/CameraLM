@@ -3,6 +3,8 @@ import logging
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
+from typing import Iterable
 
 import cv2
 import numpy as np
@@ -42,11 +44,26 @@ def _empty_schedule() -> dict[str, str]:
     return {b: "" for b in SCHEDULE_BLOCKS}
 
 
+def _empty_consent() -> dict[str, str]:
+    """Default consent block for a fresh person.
+
+    `status` is the source of truth. The other fields are filled in when consent
+    is recorded so the admin UI and audit log can show who attested it and when.
+    """
+    return {"status": "none", "granted_at": "", "granted_by": "", "notes": ""}
+
+
+def _now_iso() -> str:
+    """Local-time ISO 8601 timestamp to seconds resolution. Same shape as the
+    audit log lines so date arithmetic in `purge_stale` is straightforward."""
+    return time.strftime("%Y-%m-%dT%H:%M:%S")
+
+
 def _audit(action: str, detail: str = "") -> None:
     """Append-only accountability log for identity-database mutations."""
     try:
         with open(AUDIT_FILE, "a", encoding="utf-8") as fh:
-            fh.write(f"{time.strftime('%Y-%m-%dT%H:%M:%S')}\t{action}\t{detail}\n")
+            fh.write(f"{_now_iso()}\t{action}\t{detail}\n")
     except OSError:
         log.warning("Could not write audit log entry: %s %s", action, detail)
 
@@ -132,7 +149,16 @@ class IdentityDB:
         with self._lock:
             pid = self._next_pid
             self._next_pid += 1
-            self.people[pid] = {"name": name, "n_face": 0, "n_body": 0, "n_partial": 0, "classes": []}
+            self.people[pid] = {
+                "name": name,
+                "n_face": 0,
+                "n_body": 0,
+                "n_partial": 0,
+                "classes": [],
+                "consent": _empty_consent(),
+                "last_seen_at": "",
+                "created_at": _now_iso(),
+            }
             _audit("create_person", f"pid={pid} name={name!r}")
             return pid
 
@@ -233,6 +259,7 @@ class IdentityDB:
                 thumbnail_version = 0
                 if thumbnail.exists():
                     thumbnail_version = int(thumbnail.stat().st_mtime * 1000)
+                consent = person.get("consent") or _empty_consent()
                 people.append({
                     "pid": pid,
                     "name": person.get("name", f"Unknown {pid}"),
@@ -242,6 +269,14 @@ class IdentityDB:
                     "n_partial": person.get("n_partial", 0),
                     "has_thumbnail": thumbnail_version > 0,
                     "thumbnail_version": thumbnail_version,
+                    "consent": {
+                        "status": consent.get("status", "none"),
+                        "granted_at": consent.get("granted_at", ""),
+                        "granted_by": consent.get("granted_by", ""),
+                        "notes": consent.get("notes", ""),
+                    },
+                    "last_seen_at": person.get("last_seen_at", ""),
+                    "created_at": person.get("created_at", ""),
                 })
             classes = []
             for name in sorted(self.classes.keys(), key=str.lower):
@@ -369,6 +404,162 @@ class IdentityDB:
     def classes_of(self, pid: int) -> list[str]:
         with self._lock:
             return list(self.people.get(pid, {}).get("classes", []))
+
+    # ---- privacy: consent, retention, audit ----
+
+    def record_consent(self, pid: int, granted_by: str, notes: str = "") -> bool:
+        """Mark consent as granted for `pid`. Stamps the time + who attested it.
+
+        `granted_by` is required (free-text operator name / role). `notes` is
+        optional context - e.g. "verbal consent at 2026-03-04 staff meeting" or
+        "guardian signed paper form on file". Both are written into the audit
+        log.
+        """
+        granted_by = (granted_by or "").strip()
+        if not granted_by:
+            return False
+        with self._lock:
+            if pid not in self.people:
+                return False
+            consent = self.people[pid].setdefault("consent", _empty_consent())
+            consent["status"] = "granted"
+            consent["granted_at"] = _now_iso()
+            consent["granted_by"] = granted_by[:120]
+            consent["notes"] = (notes or "").strip()[:500]
+            _audit(
+                "record_consent",
+                f"pid={pid} by={granted_by!r} notes={consent['notes']!r}",
+            )
+            return True
+
+    def revoke_consent(self, pid: int) -> bool:
+        """Revoke consent for `pid` AND drop all their stored embeddings.
+
+        Revocation is a hard break: the system stops processing this person's
+        biometrics. Name + class memberships survive so the admin UI shows a
+        revoked entry (operators can then `delete_person` if they want a full
+        wipe). Idempotent - revoking a not-granted person still drops vectors
+        and audits the action.
+        """
+        with self._lock:
+            if pid not in self.people:
+                return False
+            for store, count_key in self._channels.values():
+                store.drop_person(pid)
+                self.people[pid][count_key] = 0
+            consent = self.people[pid].setdefault("consent", _empty_consent())
+            consent["status"] = "revoked"
+            # Keep granted_at / granted_by / notes as the historical record of
+            # when consent had been granted - the admin UI can show that this
+            # was an active subject before revocation.
+            _audit("revoke_consent", f"pid={pid}")
+            return True
+
+    def is_consent_granted(self, pid: int) -> bool:
+        """Fast read for the live-view consent gate. Defensive: an unknown pid
+        is treated as not-granted so a stale display can't accidentally surface
+        a deleted identity."""
+        with self._lock:
+            person = self.people.get(pid)
+            if not person:
+                return False
+            consent = person.get("consent") or {}
+            return consent.get("status") == "granted"
+
+    def touch_last_seen(self, pids: Iterable[int], at: str | None = None) -> None:
+        """Stamp the current ISO time on every pid in `pids` that exists.
+
+        Called by the pipeline on each recognized track. Takes the lock ONCE
+        for the whole batch so the per-frame cost is one acquire/release no
+        matter how many people are in view.
+        """
+        stamp = at or _now_iso()
+        with self._lock:
+            for pid in pids:
+                person = self.people.get(pid)
+                if person is not None:
+                    person["last_seen_at"] = stamp
+
+    def purge_stale(self, retention_days: int) -> list[dict]:
+        """Drop the biometric vectors of anyone not seen in `retention_days`.
+
+        Names + class memberships survive so the audit trail still has a
+        meaningful identifier; only the face/body/partial vectors go (the
+        identifying biometric data). People with no `last_seen_at` AND no
+        `created_at` are conservatively LEFT ALONE - we cannot prove they are
+        stale, only that they predate this feature. People with `created_at`
+        but no `last_seen_at` are aged from `created_at`.
+
+        `retention_days <= 0` disables the sweep (no-op). Returns the list of
+        people whose embeddings were cleared (pid, name, last_seen_at, age_days).
+        """
+        if retention_days <= 0:
+            return []
+        cutoff = datetime.now() - timedelta(days=retention_days)
+        purged: list[dict] = []
+        with self._lock:
+            for pid, person in list(self.people.items()):
+                stamp = person.get("last_seen_at") or person.get("created_at") or ""
+                if not stamp:
+                    continue
+                try:
+                    seen = datetime.fromisoformat(stamp)
+                except ValueError:
+                    continue
+                if seen >= cutoff:
+                    continue
+                # Stale: drop the vectors but keep the roster entry.
+                had_any = any(
+                    store.count_for(pid) > 0 for store, _ in self._channels.values()
+                )
+                if not had_any:
+                    # Nothing to purge for this person; skip the audit churn.
+                    continue
+                for store, count_key in self._channels.values():
+                    store.drop_person(pid)
+                    person[count_key] = 0
+                age_days = (datetime.now() - seen).days
+                purged.append({
+                    "pid": pid,
+                    "name": person.get("name", f"Unknown {pid}"),
+                    "last_seen_at": stamp,
+                    "age_days": age_days,
+                })
+                _audit(
+                    "purge_stale",
+                    f"pid={pid} last_seen={stamp} age_days={age_days}",
+                )
+        return purged
+
+    def read_audit(self, limit: int = 200, since: str | None = None) -> list[dict]:
+        """Read the most recent audit-log entries (newest last).
+
+        `since` is an ISO datetime string; only entries strictly after it are
+        returned. Each entry is `{ts, action, detail}`. Malformed lines are
+        skipped silently rather than failing the whole read - the audit log is
+        append-only and a partial write should not lock out the dashboard.
+        """
+        if not AUDIT_FILE.exists():
+            return []
+        try:
+            with open(AUDIT_FILE, "r", encoding="utf-8") as fh:
+                lines = fh.readlines()
+        except OSError:
+            return []
+        rows: list[dict] = []
+        for line in lines:
+            parts = line.rstrip("\n").split("\t", 2)
+            if len(parts) < 2:
+                continue
+            ts = parts[0]
+            action = parts[1]
+            detail = parts[2] if len(parts) > 2 else ""
+            if since and ts <= since:
+                continue
+            rows.append({"ts": ts, "action": action, "detail": detail})
+        if limit > 0 and len(rows) > limit:
+            rows = rows[-limit:]
+        return rows
 
     # ---- schedule ----
 
@@ -542,6 +733,21 @@ class IdentityDB:
         for p in self.people.values():
             p.setdefault("classes", [])
             p.setdefault("n_partial", 0)
+            # Pre-privacy installs have no consent / last_seen / created_at
+            # fields. Backfill with empty defaults so the rest of the code can
+            # read them unconditionally; existing data is treated as "consent
+            # never recorded" (which is the safe default).
+            consent = p.get("consent")
+            if not isinstance(consent, dict):
+                consent = _empty_consent()
+            else:
+                for k, default in _empty_consent().items():
+                    consent.setdefault(k, default)
+                if consent["status"] not in ("none", "granted", "revoked"):
+                    consent["status"] = "none"
+            p["consent"] = consent
+            p.setdefault("last_seen_at", "")
+            p.setdefault("created_at", "")
         self.classes = meta.get("classes", {})
         # Schedule: per-block. Tolerates a legacy per-(day,block) file by
         # collapsing each block to the first non-empty class it had under any

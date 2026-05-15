@@ -269,14 +269,17 @@ class PipelineWorker:
             frame_info[tid] = cached
 
         # --- Pass 3: per-track upkeep for every visible track ---
+        seen_pids: set[int] = set()
         for tid, cached in frame_info.items():
             pid = cached.pid
-            if pid is not None and self._db.has_person(pid) and not self._db.has_thumbnail(pid):
-                if now - self._last_thumbnail_attempt.get(pid, 0.0) > 1.0:
-                    self._last_thumbnail_attempt[pid] = now
-                    crop = crop_bbox(frame, cached.bbox)
-                    if crop is not None and self._db.save_thumbnail(pid, crop):
-                        log.info("Saved thumbnail for person %d.", pid)
+            if pid is not None and self._db.has_person(pid):
+                seen_pids.add(pid)
+                if not self._db.has_thumbnail(pid):
+                    if now - self._last_thumbnail_attempt.get(pid, 0.0) > 1.0:
+                        self._last_thumbnail_attempt[pid] = now
+                        crop = crop_bbox(frame, cached.bbox)
+                        if crop is not None and self._db.save_thumbnail(pid, crop):
+                            log.info("Saved thumbnail for person %d.", pid)
 
             # Submit-gate: only ask the VLM about a track with no current
             # description. Inert while USE_VLM is False (vlm_worker is None).
@@ -285,6 +288,11 @@ class PipelineWorker:
                     crop = crop_bbox(frame, cached.bbox)
                     if crop is not None and self._vlm_worker.submit(tid, crop):
                         self._last_vlm_submit[tid] = now
+
+        # Retention bookkeeping: one batched lock acquisition per inference
+        # frame, regardless of crowd size. Drives the purge_stale cutoff.
+        if seen_pids:
+            self._db.touch_last_seen(seen_pids)
 
         # Prune state for tracks gone for > 5s.
         for tid in list(self._track_cache.keys()):
